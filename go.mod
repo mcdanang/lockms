@@ -1,4 +1,4 @@
-module api
+module go-app-be
 
 go 1.20
 

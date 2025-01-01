@@ -2,48 +2,16 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
+	"go-app-be/routes"
 	"log"
 	"net/http"
 	"os"
 
 	"github.com/gorilla/mux"
-	_ "github.com/lib/pq"
+	_ "github.com/lib/pq" // PostgreSQL driver
 )
 
-type User struct {
-	ID    int    `json:"id"`
-	Name  string `json:"name"`
-	Email string `json:"email"`
-}
-
-func main() {
-	//Database
-	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	//create the table if it does not exist
-	_, err = db.Exec("CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT, email TEXT)")
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	//Router
-	router := mux.NewRouter()
-	router.HandleFunc("/users", getUsers(db)).Methods("GET")
-	router.HandleFunc("/users/{id}", getUser(db)).Methods("GET")
-	router.HandleFunc("/users", createUser(db)).Methods("POST")
-	router.HandleFunc("/users/{id}", updateUser(db)).Methods("PUT")
-	router.HandleFunc("/users/{id}", deleteUser(db)).Methods("DELETE")
-
-	//Start server
-	log.Fatal(http.ListenAndServe(":8000", jsonContentTypeMiddleware(router)))
-}
-
+// jsonContentTypeMiddleware is a middleware to set the Content-Type header to application/json
 func jsonContentTypeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -51,104 +19,64 @@ func jsonContentTypeMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// Controller
-// Get user
-func getUsers(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		rows, err := db.Query("SELECT * FROM users")
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer rows.Close()
+func createTablesIfNotExist(db *sql.DB) {
+	// Create keys table if not exists
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS keys (
+			id SERIAL PRIMARY KEY,
+			name TEXT NOT NULL,
+			description TEXT
+		)
+	`)
+	if err != nil {
+		log.Fatal("Error creating keys table: ", err)
+	}
 
-		users := []User{}
-		for rows.Next() {
-			var u User
-			if err := rows.Scan(&u.ID, &u.Name, &u.Email); err != nil {
-				log.Fatal(err)
-			}
-			users = append(users, u)
-		}
+	// Create key_copies table if not exists
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS key_copies (
+			id SERIAL PRIMARY KEY,
+			key_id INTEGER REFERENCES keys(id),
+			staff_id INTEGER
+		)
+	`)
+	if err != nil {
+		log.Fatal("Error creating key_copies table: ", err)
+	}
 
-		json.NewEncoder(w).Encode(users)
+	// Create staff table if not exists
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS staff (
+			id SERIAL PRIMARY KEY,
+			name TEXT NOT NULL,
+			role TEXT
+		)
+	`)
+	if err != nil {
+		log.Fatal("Error creating staff table: ", err)
 	}
 }
 
-// get user by id
-func getUser(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		vars := mux.Vars(r)
-		id := vars["id"]
-
-		var u User
-		err := db.QueryRow("SELECT * FROM users WHERE id = $1", id).Scan(&u.ID, &u.Name, &u.Email)
-		if err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		json.NewEncoder(w).Encode(u)
+func main() {
+	// Initialize the database connection
+	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatal(err)
 	}
-}
+	defer db.Close()
 
-// create user
-func createUser(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var u User
-		json.NewDecoder(r.Body).Decode(&u)
+	// Create tables if they don't exist
+	createTablesIfNotExist(db)
 
-		err := db.QueryRow("INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id", u.Name, u.Email).Scan(&u.ID)
-		if err != nil {
-			log.Fatal(err)
-		}
+	// Initialize the router
+	router := mux.NewRouter()
 
-		json.NewEncoder(w).Encode(u)
-	}
-}
+	// Setup routes
+	routes.SetupRoutes(router, db)
 
-// update user
-func updateUser(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var u User
-		json.NewDecoder(r.Body).Decode(&u)
+	// Apply JSON middleware
+	router.Use(jsonContentTypeMiddleware)
 
-		vars := mux.Vars(r)
-		id := vars["id"]
-
-		var existingUser User
-		err := db.QueryRow("SELECT * FROM users WHERE id = $1", id).Scan(&existingUser.ID, &existingUser.Name, &existingUser.Email)
-		if err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		} else {
-			_, err := db.Exec("UPDATE users SET name = $1, email = $2 WHERE id = $3", u.Name, u.Email, id)
-			if err != nil {
-				log.Fatal(err)
-			}
-		}
-
-		json.NewEncoder(w).Encode(u)
-	}
-}
-
-// delete user
-func deleteUser(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		vars := mux.Vars(r)
-		id := vars["id"]
-
-		var existingUser User
-		err := db.QueryRow("SELECT * FROM users WHERE id = $1", id).Scan(&existingUser.ID, &existingUser.Name, &existingUser.Email)
-		if err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		} else {
-			_, err := db.Exec("DELETE FROM users WHERE id = $1", id)
-			if err != nil {
-				log.Fatal(err)
-			}
-		}
-
-		json.NewEncoder(w).Encode("User deleted")
-	}
+	// Start the server
+	log.Fatal(http.ListenAndServe(":8000", router))
 }
